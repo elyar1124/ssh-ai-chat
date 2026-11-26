@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Secrets & local runtime config
+.env
+.env.*
+!.env.example
+
+# User hosts, SSH credentials, and chat history
+data/
+.ssh-ai-uploads/
+
+# Local helper binaries (e.g. cloudflared)
+bin/
+
+# Logs & OS files
+*.log
+.DS_Store
+Thumbs.db

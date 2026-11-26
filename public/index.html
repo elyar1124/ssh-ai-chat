@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="SSH AI" />
+  <meta name="theme-color" content="#0d1117" />
+  <title>SSH AI Chat</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <link rel="stylesheet" href="/vendor/xterm.css" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Auth Overlay (only shown when APP_PASSWORD is enabled) -->
+  <div id="auth-screen" class="auth-screen hidden">
+    <div class="auth-card">
+      <img src="/icon.svg" alt="SSH AI" class="auth-logo" />
+      <h1>SSH AI Chat</h1>
+      <p>输入访问密码以继续</p>
+      <form id="auth-form">
+        <input id="auth-password" type="password" placeholder="访问密码" autocomplete="current-password" required />
+        <button type="submit" class="btn-primary full">进入</button>
+      </form>
+      <div id="auth-error" class="form-error hidden"></div>
+    </div>
+  </div>
+
+  <!-- App Shell -->
+  <div id="app" class="app-shell">
+    <!-- Mobile Drawer Backdrop -->
+    <div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
+
+    <!-- Sidebar / Drawer -->
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <img src="/icon.svg" alt="" class="brand-icon" />
+          <span>SSH AI Chat</span>
+        </div>
+        <button id="btn-close-drawer" class="icon-btn mobile-only" aria-label="关闭菜单">✕</button>
+      </div>
+
+      <!-- Hosts Section -->
+      <div class="sidebar-section">
+        <div class="section-header">
+          <span>主机列表</span>
+          <button id="btn-add-host" class="text-btn">+ 添加 SSH</button>
+        </div>
+        <div id="host-list" class="host-list"></div>
+      </div>
+
+      <!-- Conversations Section -->
+      <div class="sidebar-section flex-1">
+        <div class="section-header">
+          <span>对话历史</span>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <button id="btn-open-sync" class="text-btn" title="同步电脑端 Codex / AGY 会话">🔄 同步电脑会话</button>
+            <button id="btn-new-chat" class="text-btn">+ 新对话</button>
+          </div>
+        </div>
+        <div id="conv-list" class="conv-list"></div>
+      </div>
+
+      <!-- Sidebar Footer -->
+      <div class="sidebar-footer">
+        <button id="btn-toggle-theme" class="ghost-btn">🌓 切换主题</button>
+        <button id="btn-logout" class="ghost-btn hidden">退出登录</button>
+      </div>
+    </aside>
+
+    <!-- Main Workspace -->
+    <main class="main-area">
+      <!-- Top Bar -->
+      <header class="topbar">
+        <button id="btn-menu" class="icon-btn" aria-label="打开菜单">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+          </svg>
+        </button>
+
+        <div class="topbar-center" id="btn-open-chat-settings" role="button" tabindex="0">
+          <div class="topbar-title-row">
+            <span id="topbar-title" class="topbar-title">SSH AI Chat</span>
+            <span id="topbar-agent-badge" class="agent-badge">Codex</span>
+          </div>
+          <div id="topbar-subtitle" class="topbar-subtitle">未选择主机</div>
+        </div>
+
+        <div class="mode-switch">
+          <button id="tab-chat" class="mode-tab active">对话</button>
+          <button id="tab-files" class="mode-tab">文件</button>
+          <button id="tab-terminal" class="mode-tab">终端</button>
+        </div>
+      </header>
+
+      <!-- Chat View -->
+      <section id="chat-view" class="view-panel active">
+        <div id="messages-container" class="messages-container">
+          <!-- Messages or Welcome Empty State rendered here -->
+        </div>
+
+        <!-- Bottom Composer -->
+        <div class="composer-wrap">
+          <div class="composer-meta">
+            <div class="agent-pills">
+              <button class="pill-btn" data-agent="codex">Codex</button>
+              <button class="pill-btn" data-agent="agy">Antigravity</button>
+              <button class="pill-btn" data-agent="shell">Shell</button>
+            </div>
+            <button id="btn-model-pill" class="model-pill" title="点击切换模型与推理强度">🤖 默认模型</button>
+            <button id="btn-usage" class="icon-btn sm" title="查看 Usage 与额度">📊</button>
+            <button id="btn-sync-conv" class="icon-btn sm hidden" title="同步电脑端该会话最新消息">🔄</button>
+            <button id="btn-cwd-pill" class="cwd-pill" title="点击修改工作目录">📁 ~</button>
+            <button id="btn-chat-opts" class="icon-btn sm" title="对话设置">⚙️</button>
+          </div>
+
+          <!-- Pending Attachments Preview Strip -->
+          <div id="pending-attachments" class="pending-attachments hidden"></div>
+
+          <!-- Attach Action Popover -->
+          <div id="attach-menu" class="attach-menu hidden">
+            <button type="button" id="btn-pick-image" class="attach-menu-item">📷 选择图片 / 拍照</button>
+            <button type="button" id="btn-pick-file" class="attach-menu-item">📄 选择任意文件</button>
+            <button type="button" id="btn-pick-remote" class="attach-menu-item">🗂 从远端文件浏览</button>
+          </div>
+
+          <input id="input-image-file" type="file" accept="image/*" multiple class="hidden" />
+          <input id="input-any-file" type="file" multiple class="hidden" />
+
+          <div class="composer-box">
+            <button type="button" id="btn-attach" class="attach-btn" aria-label="上传图片或文件" title="上传图片/文件">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+            </button>
+            <textarea
+              id="prompt-input"
+              rows="1"
+              placeholder="给 AI 发指令（自动通过 SSH 执行）..."
+              enterkeyhint="send"
+            ></textarea>
+            <button id="btn-send" class="send-btn" aria-label="发送">
+              <svg id="icon-send" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="19" x2="12" y2="5"></line>
+                <polyline points="5 12 12 5 19 12"></polyline>
+              </svg>
+              <svg id="icon-stop" class="hidden" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="5" y="5" width="14" height="14" rx="3"></rect>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Remote File Manager View -->
+      <section id="files-view" class="view-panel">
+        <div class="files-toolbar">
+          <div class="files-path-row">
+            <button id="btn-files-up" class="mini-btn" title="上一级目录">↑ 上级</button>
+            <div id="files-current-path" class="files-current-path">~</div>
+            <button id="btn-files-refresh" class="mini-btn" title="刷新">↻</button>
+          </div>
+          <div class="files-actions-row">
+            <button id="btn-files-upload" class="btn-primary sm">⬆️ 上传文件到当前目录</button>
+            <button id="btn-files-set-cwd" class="btn-secondary sm">设为对话目录</button>
+            <input id="input-dir-upload" type="file" multiple class="hidden" />
+          </div>
+        </div>
+        <div id="files-list" class="files-list"></div>
+      </section>
+
+      <!-- Live Interactive Terminal View -->
+      <section id="terminal-view" class="view-panel">
+        <div class="term-status-bar">
+          <span id="term-status-text">未连接</span>
+          <div class="term-actions">
+            <button id="btn-term-font-dec" class="mini-btn">A-</button>
+            <button id="btn-term-font-inc" class="mini-btn">A+</button>
+            <button id="btn-term-reconnect" class="mini-btn">重连</button>
+          </div>
+        </div>
+        <div id="xterm-container" class="xterm-container"></div>
+        <div class="term-toolbar">
+          <button class="key-btn" data-key="esc">Esc</button>
+          <button class="key-btn" data-key="tab">Tab</button>
+          <button class="key-btn" data-key="ctrl-c">Ctrl+C</button>
+          <button class="key-btn" data-key="ctrl-d">Ctrl+D</button>
+          <button class="key-btn" data-key="up">↑</button>
+          <button class="key-btn" data-key="down">↓</button>
+          <button class="key-btn" data-key="left">←</button>
+          <button class="key-btn" data-key="right">→</button>
+          <button class="key-btn" data-key="enter">↵</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Modal: Add / Edit Host -->
+  <div id="host-modal" class="modal-overlay hidden">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2 id="host-modal-title">添加 SSH 主机</h2>
+        <button class="icon-btn modal-close" data-close="host-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <!-- Quick SSH Command Paste -->
+        <div class="quick-parse-box">
+          <label>一键粘贴 SSH 命令（支持 InstaBox Token）</label>
+          <div class="quick-parse-row">
+            <input id="ssh-paste-input" type="text" placeholder="ssh -p 2222 ibssh_xxx@ssh.instabox.sh" />
+            <button type="button" id="btn-parse-ssh" class="btn-secondary">识别</button>
+          </div>
+        </div>
+
+        <form id="host-form">
+          <input type="hidden" id="host-id" />
+
+          <div class="form-row">
+            <label>连接类型</label>
+            <select id="host-type">
+              <option value="ssh">SSH 远程主机</option>
+              <option value="local">本机 (Local)</option>
+            </select>
+          </div>
+
+          <div class="form-row">
+            <label>备注名称</label>
+            <input id="host-name" type="text" placeholder="例如：我的 InstaBox" required />
+          </div>
+
+          <div id="ssh-fields">
+            <div class="form-grid-2">
+              <div class="form-row">
+                <label>主机地址 (Host)</label>
+                <input id="host-addr" type="text" placeholder="ssh.instabox.sh" />
+              </div>
+              <div class="form-row">
+                <label>端口 (Port)</label>
+                <input id="host-port" type="number" value="2222" />
+              </div>
+            </div>
+
+            <div class="form-row">
+              <label>用户名 (Username / Token)</label>
+              <input id="host-user" type="text" placeholder="ibssh_... 或 root" autocomplete="off" />
+            </div>
+
+            <div class="form-row">
+              <label>认证方式</label>
+              <select id="host-auth-type">
+                <option value="token">SSH Token / 免密（InstaBox 推荐）</option>
+                <option value="password">密码</option>
+                <option value="key">SSH 私钥</option>
+              </select>
+            </div>
+
+            <div id="auth-password-row" class="form-row hidden">
+              <label>密码</label>
+              <input id="host-password" type="password" placeholder="留空表示保持原密码不变" />
+            </div>
+
+            <div id="auth-key-rows" class="hidden">
+              <div class="form-row">
+                <label>服务端私钥路径（选填）</label>
+                <input id="host-key-path" type="text" placeholder="~/.ssh/id_ed25519" />
+              </div>
+              <div class="form-row">
+                <label>或直接粘贴私钥内容</label>
+                <textarea id="host-key-text" rows="3" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+              </div>
+              <div class="form-row">
+                <label>私钥口令 (Passphrase，选填)</label>
+                <input id="host-passphrase" type="password" placeholder="无口令可留空" />
+              </div>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <label>默认工作目录</label>
+            <input id="host-cwd" type="text" value="~" placeholder="~ 或 /root/project" />
+          </div>
+
+          <div id="host-test-result" class="test-result hidden"></div>
+
+          <div class="modal-actions">
+            <button type="button" id="btn-delete-host" class="btn-danger hidden">删除</button>
+            <button type="button" id="btn-test-host" class="btn-secondary">测试连接</button>
+            <button type="submit" class="btn-primary">保存</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Chat Settings -->
+  <div id="chat-settings-modal" class="modal-overlay hidden">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>对话设置</h2>
+        <button class="icon-btn modal-close" data-close="chat-settings-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <form id="chat-settings-form">
+          <div class="form-row">
+            <label>对话标题</label>
+            <input id="cs-title" type="text" placeholder="新对话" />
+          </div>
+
+          <div class="form-row">
+            <label>执行引擎</label>
+            <select id="cs-agent">
+              <option value="codex">Codex CLI (codex exec --json)</option>
+              <option value="agy">Antigravity CLI (agy -p stream-json)</option>
+              <option value="shell">直接 Shell 命令</option>
+            </select>
+          </div>
+
+          <div class="form-row">
+            <label>工作目录 (cwd)</label>
+            <input id="cs-cwd" type="text" placeholder="~ 或 /workspace/my-app" />
+          </div>
+
+          <div class="form-row">
+            <label>自定义模型（选填，留空用默认）</label>
+            <input id="cs-model" type="text" placeholder="例如 o3 / gpt-5 / gemini-2.5-pro" />
+          </div>
+
+          <div class="form-row checkbox-row">
+            <label class="switch-label">
+              <input id="cs-auto-approve" type="checkbox" checked />
+              <span>自动批准工具与命令执行（非交互模式必需）</span>
+            </label>
+          </div>
+
+          <div class="form-row">
+            <label>远端会话 ID（用于多轮上下文续接）</label>
+            <div class="session-row">
+              <code id="cs-session-id">尚未建立</code>
+              <button type="button" id="btn-reset-session" class="btn-secondary sm">重置上下文</button>
+            </div>
+          </div>
+
+          <div class="modal-actions">
+            <button type="button" id="btn-delete-conv" class="btn-danger">删除对话</button>
+            <button type="submit" class="btn-primary">保存设置</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Model & Effort Picker -->
+  <div id="model-modal" class="modal-overlay hidden">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2 id="model-modal-title">选择模型</h2>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button type="button" id="btn-refresh-models" class="mini-btn">↻ 刷新</button>
+          <button class="icon-btn modal-close" data-close="model-modal">✕</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div id="effort-section" class="form-row">
+          <label>推理强度 (Reasoning Effort)</label>
+          <div id="effort-pills" class="effort-pills"></div>
+        </div>
+
+        <div class="form-row">
+          <label id="model-list-label">可用模型列表</label>
+          <div id="model-list" class="model-list"></div>
+        </div>
+
+        <div class="form-row" style="margin-top:12px;">
+          <label>或手动输入自定义模型 ID</label>
+          <div class="quick-parse-row">
+            <input id="custom-model-input" type="text" placeholder="留空则使用默认模型" />
+            <button type="button" id="btn-apply-custom-model" class="btn-primary sm">应用</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Sync Computer CLI Sessions -->
+  <div id="sync-modal" class="modal-overlay hidden">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>🔄 同步电脑端会话</h2>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button type="button" id="btn-refresh-sync" class="mini-btn">↻ 刷新</button>
+          <button class="icon-btn modal-close" data-close="sync-modal">✕</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="sync-filter-row">
+          <button type="button" class="pill-btn active" data-sync-filter="all">全部</button>
+          <button type="button" class="pill-btn" data-sync-filter="codex">Codex</button>
+          <button type="button" class="pill-btn" data-sync-filter="agy">Antigravity</button>
+        </div>
+        <div id="sync-session-list" class="sync-session-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Usage & Quota Dashboard -->
+  <div id="usage-modal" class="modal-overlay hidden">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>📊 用量与额度 (Usage)</h2>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button type="button" id="btn-refresh-usage" class="mini-btn">↻ 刷新</button>
+          <button class="icon-btn modal-close" data-close="usage-modal">✕</button>
+        </div>
+      </div>
+      <div id="usage-body" class="modal-body">
+        <div style="padding:20px;text-align:center;color:var(--text-muted);">正在拉取远端用量数据...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Image Preview Lightbox Modal -->
+  <div id="preview-modal" class="modal-overlay hidden">
+    <div class="preview-box">
+      <div class="preview-header">
+        <span id="preview-title">预览</span>
+        <div class="preview-actions">
+          <a id="preview-download-link" class="btn-primary sm" download>下载</a>
+          <button class="icon-btn modal-close" data-close="preview-modal">✕</button>
+        </div>
+      </div>
+      <div class="preview-body">
+        <img id="preview-img" alt="预览图片" />
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/vendor/marked.umd.js"></script>
+  <script src="/vendor/xterm.js"></script>
+  <script src="/vendor/addon-fit.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

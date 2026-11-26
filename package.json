@@ -1,0 +1,19 @@
+{
+  "name": "ssh-ai-chat",
+  "version": "1.0.0",
+  "description": "Mobile-first AI Chat PWA over SSH for Codex CLI, Antigravity CLI (agy), and Shell",
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "highlight.js": "^11.11.1",
+    "marked": "^15.0.7",
+    "ssh2": "^1.16.0",
+    "ws": "^8.18.1",
+    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-fit": "^0.10.0"
+  }
+}
