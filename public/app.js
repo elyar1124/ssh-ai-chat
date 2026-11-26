@@ -216,16 +216,53 @@
     applyTheme(state.theme === 'dark' ? 'light' : 'dark');
   });
 
-  // ---- Chat WebSocket ----
-  function connectChatWs() {
-    if (state.chatWs && (state.chatWs.readyState === 0 || state.chatWs.readyState === 1)) return;
+  // ---- Chat WebSocket (with Heartbeat & Fast Mobile Reconnect) ----
+  let chatPingTimer = null;
+  let chatPongTimeout = null;
+  let chatReconnectTimer = null;
+
+  function stopChatHeartbeat() {
+    clearInterval(chatPingTimer);
+    clearTimeout(chatPongTimeout);
+    chatPingTimer = null;
+    chatPongTimeout = null;
+  }
+
+  function connectChatWs(force = false) {
+    if (!force && state.chatWs && (state.chatWs.readyState === 0 || state.chatWs.readyState === 1)) return;
+    if (force && state.chatWs) {
+      try { state.chatWs.close(); } catch {}
+      state.chatWs = null;
+    }
+    clearTimeout(chatReconnectTimer);
+    stopChatHeartbeat();
+
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${location.host}/ws/chat`);
     state.chatWs = ws;
 
+    ws.onopen = () => {
+      stopChatHeartbeat();
+      chatPingTimer = setInterval(() => {
+        if (ws.readyState !== 1) return;
+        try { ws.send(JSON.stringify({ type: 'ping' })); } catch {}
+        clearTimeout(chatPongTimeout);
+        chatPongTimeout = setTimeout(() => {
+          if (state.chatWs === ws) {
+            try { ws.close(); } catch {}
+          }
+        }, 8000);
+      }, 20000);
+    };
+
     ws.onmessage = (event) => {
       let msg;
       try { msg = JSON.parse(event.data); } catch { return; }
+
+      if (msg.type === 'pong') {
+        clearTimeout(chatPongTimeout);
+        return;
+      }
 
       if (msg.type === 'error') {
         showToast(msg.error || '发生错误');
@@ -278,9 +315,30 @@
     };
 
     ws.onclose = () => {
-      setTimeout(connectChatWs, 2000);
+      if (state.chatWs === ws) {
+        stopChatHeartbeat();
+        chatReconnectTimer = setTimeout(() => connectChatWs(false), 1800);
+      }
     };
   }
+
+  // Reconnect immediately when returning to the app on iOS/mobile or recovering network
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      if (!state.chatWs || state.chatWs.readyState !== 1) {
+        connectChatWs(true);
+      } else {
+        try { state.chatWs.send(JSON.stringify({ type: 'ping' })); } catch {}
+      }
+      if (state.activeConv && state.runningConvIds.has(state.activeConv.id)) {
+        selectConversation(state.activeConv.id).catch(() => {});
+      }
+    }
+  });
+
+  window.addEventListener('online', () => {
+    connectChatWs(true);
+  });
 
   // ---- Hosts Rendering & Management ----
   function getSelectedHost() {
@@ -335,10 +393,6 @@
 
     const host = getSelectedHost();
     state.filesDir = state.activeConv?.cwd || host?.defaultCwd || '~';
-    if (host) {
-      // Quietly warm up available models for the model pill
-      ensureHostModels(host.id, false).then(() => renderComposerMeta()).catch(() => {});
-    }
     if (state.activeTab === 'files') {
       loadFilesDir(state.filesDir);
     } else if (state.activeTab === 'terminal') {
@@ -989,7 +1043,6 @@
       const target = state.filesDir || state.activeConv?.cwd || host?.defaultCwd || '~';
       loadFilesDir(target);
     } else if (tab === 'terminal') {
-      initTerminalIfNeeded();
       if (!state.termWs || state.termWs.readyState !== 1) {
         reconnectTerminal();
       } else {
@@ -1153,9 +1206,44 @@
     }
   });
 
-  // ---- Interactive Xterm.js Terminal ----
-  function initTerminalIfNeeded() {
+  // ---- Interactive Xterm.js Terminal (Lazy-Loaded for Fast Initial Page Load) ----
+  let xtermLoadPromise = null;
+
+  function loadScriptOnce(src) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error(`加载 ${src} 失败`));
+      document.body.appendChild(s);
+    });
+  }
+
+  function ensureXtermLoaded() {
+    if (window.Terminal && window.FitAddon) return Promise.resolve();
+    if (xtermLoadPromise) return xtermLoadPromise;
+
+    xtermLoadPromise = (async () => {
+      if (!document.querySelector('link[href="/vendor/xterm.css"]')) {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = '/vendor/xterm.css';
+        document.head.appendChild(link);
+      }
+      await loadScriptOnce('/vendor/xterm.js');
+      await loadScriptOnce('/vendor/addon-fit.js');
+    })().catch((err) => {
+      xtermLoadPromise = null;
+      throw err;
+    });
+
+    return xtermLoadPromise;
+  }
+
+  async function initTerminalIfNeeded() {
     if (state.term) return;
+    $('term-status-text').textContent = '正在加载终端组件...';
+    await ensureXtermLoaded();
     const term = new window.Terminal({
       cursorBlink: true,
       fontSize: state.termFontSize,
@@ -1200,8 +1288,13 @@
     } catch {}
   }
 
-  function reconnectTerminal() {
-    initTerminalIfNeeded();
+  async function reconnectTerminal() {
+    try {
+      await initTerminalIfNeeded();
+    } catch (err) {
+      $('term-status-text').textContent = err.message || '加载终端组件失败';
+      return;
+    }
     if (state.termWs) {
       try { state.termWs.close(); } catch {}
       state.termWs = null;

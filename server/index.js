@@ -2,6 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
@@ -63,6 +64,79 @@ function safeEqual(a, b) {
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
+
+// ---- Built-in Gzip / Brotli Compression (for fast weak-network loads) ----
+const compressedFileCache = new Map(); // cacheKey -> { mtimeMs, br, gzip, raw }
+
+function pickEncoding(req) {
+  const ae = String(req.headers['accept-encoding'] || '');
+  if (ae.includes('br')) return 'br';
+  if (ae.includes('gzip')) return 'gzip';
+  return 'identity';
+}
+
+function sendStaticAsset(req, res, filePath, contentType, cacheControl) {
+  try {
+    const stat = fs.statSync(filePath);
+    let entry = compressedFileCache.get(filePath);
+    if (!entry || entry.mtimeMs !== stat.mtimeMs) {
+      const raw = fs.readFileSync(filePath);
+      entry = {
+        mtimeMs: stat.mtimeMs,
+        raw,
+        gzip: zlib.gzipSync(raw, { level: 6 }),
+        br: zlib.brotliCompressSync(raw, {
+          params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 }
+        })
+      };
+      compressedFileCache.set(filePath, entry);
+    }
+
+    const enc = pickEncoding(req);
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', cacheControl);
+    res.setHeader('Vary', 'Accept-Encoding');
+
+    if (enc === 'br') {
+      res.setHeader('Content-Encoding', 'br');
+      res.end(entry.br);
+    } else if (enc === 'gzip') {
+      res.setHeader('Content-Encoding', 'gzip');
+      res.end(entry.gzip);
+    } else {
+      res.end(entry.raw);
+    }
+  } catch {
+    res.status(404).end('Not Found');
+  }
+}
+
+// Compress JSON API responses >= 1KB
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/') || req.path.endsWith('/files/download')) {
+    return next();
+  }
+  const origJson = res.json.bind(res);
+  res.json = (body) => {
+    const str = JSON.stringify(body);
+    const buf = Buffer.from(str, 'utf8');
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Vary', 'Accept-Encoding');
+    if (buf.length >= 1024) {
+      const enc = pickEncoding(req);
+      if (enc === 'br') {
+        res.setHeader('Content-Encoding', 'br');
+        return res.end(zlib.brotliCompressSync(buf, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 } }));
+      }
+      if (enc === 'gzip') {
+        res.setHeader('Content-Encoding', 'gzip');
+        return res.end(zlib.gzipSync(buf, { level: 5 }));
+      }
+    }
+    return res.end(buf);
+  };
+  next();
+});
 
 // ---- Auth Routes ----
 app.get('/api/auth/status', (req, res) => {
@@ -356,46 +430,66 @@ app.delete('/api/conversations/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// ---- Vendor Static Assets (Zero External CDN) ----
-app.get('/vendor/marked.umd.js', (_req, res) => {
-  res.sendFile(path.join(NM_DIR, 'marked', 'lib', 'marked.umd.js'));
+// ---- Vendor Static Assets (Zero External CDN, Compressed & Immutable Cache) ----
+const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
+const NO_STORE_CACHE = 'no-store, no-cache, must-revalidate';
+
+app.get('/vendor/marked.umd.js', (req, res) => {
+  sendStaticAsset(req, res, path.join(NM_DIR, 'marked', 'lib', 'marked.umd.js'), 'application/javascript; charset=utf-8', IMMUTABLE_CACHE);
 });
-app.get('/vendor/xterm.js', (_req, res) => {
-  res.sendFile(path.join(NM_DIR, '@xterm', 'xterm', 'lib', 'xterm.js'));
+app.get('/vendor/xterm.js', (req, res) => {
+  sendStaticAsset(req, res, path.join(NM_DIR, '@xterm', 'xterm', 'lib', 'xterm.js'), 'application/javascript; charset=utf-8', IMMUTABLE_CACHE);
 });
-app.get('/vendor/xterm.css', (_req, res) => {
-  res.sendFile(path.join(NM_DIR, '@xterm', 'xterm', 'css', 'xterm.css'));
+app.get('/vendor/xterm.css', (req, res) => {
+  sendStaticAsset(req, res, path.join(NM_DIR, '@xterm', 'xterm', 'css', 'xterm.css'), 'text/css; charset=utf-8', IMMUTABLE_CACHE);
 });
-app.get('/vendor/addon-fit.js', (_req, res) => {
-  res.sendFile(path.join(NM_DIR, '@xterm', 'addon-fit', 'lib', 'addon-fit.js'));
+app.get('/vendor/addon-fit.js', (req, res) => {
+  sendStaticAsset(req, res, path.join(NM_DIR, '@xterm', 'addon-fit', 'lib', 'addon-fit.js'), 'application/javascript; charset=utf-8', IMMUTABLE_CACHE);
 });
-app.get('/vendor/hljs-dark.css', (_req, res) => {
-  res.sendFile(path.join(NM_DIR, 'highlight.js', 'styles', 'github-dark.min.css'));
+app.get('/vendor/hljs-dark.css', (req, res) => {
+  sendStaticAsset(req, res, path.join(NM_DIR, 'highlight.js', 'styles', 'github-dark.min.css'), 'text/css; charset=utf-8', IMMUTABLE_CACHE);
 });
-app.get('/vendor/hljs-light.css', (_req, res) => {
-  res.sendFile(path.join(NM_DIR, 'highlight.js', 'styles', 'github.min.css'));
+app.get('/vendor/hljs-light.css', (req, res) => {
+  sendStaticAsset(req, res, path.join(NM_DIR, 'highlight.js', 'styles', 'github.min.css'), 'text/css; charset=utf-8', IMMUTABLE_CACHE);
 });
 
 const ASSET_VERSION = String(Date.now());
 
-app.get(['/', '/index.html'], (_req, res) => {
+app.get(['/', '/index.html'], (req, res) => {
   const htmlPath = path.join(PUBLIC_DIR, 'index.html');
   const html = fs
     .readFileSync(htmlPath, 'utf8')
     .replace('/styles.css', `/styles.css?v=${ASSET_VERSION}`)
     .replace('/app.js', `/app.js?v=${ASSET_VERSION}`);
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  const buf = Buffer.from(html, 'utf8');
+  const enc = pickEncoding(req);
+  res.setHeader('Cache-Control', NO_STORE_CACHE);
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(html);
+  res.setHeader('Vary', 'Accept-Encoding');
+  if (enc === 'br') {
+    res.setHeader('Content-Encoding', 'br');
+    return res.end(zlib.brotliCompressSync(buf, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 } }));
+  }
+  if (enc === 'gzip') {
+    res.setHeader('Content-Encoding', 'gzip');
+    return res.end(zlib.gzipSync(buf, { level: 6 }));
+  }
+  return res.end(buf);
+});
+
+app.get('/app.js', (req, res) => {
+  const cache = req.query.v ? IMMUTABLE_CACHE : NO_STORE_CACHE;
+  sendStaticAsset(req, res, path.join(PUBLIC_DIR, 'app.js'), 'application/javascript; charset=utf-8', cache);
+});
+
+app.get('/styles.css', (req, res) => {
+  const cache = req.query.v ? IMMUTABLE_CACHE : NO_STORE_CACHE;
+  sendStaticAsset(req, res, path.join(PUBLIC_DIR, 'styles.css'), 'text/css; charset=utf-8', cache);
 });
 
 app.use(
   express.static(PUBLIC_DIR, {
-    setHeaders(res, filePath) {
-      if (/\.(html|js|css)$/i.test(filePath)) {
-        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-      }
-    }
+    maxAge: '1d'
   })
 );
 
@@ -441,6 +535,8 @@ server.on('upgrade', (req, socket, head) => {
 
 // ---- Chat WebSocket ----
 chatWss.on('connection', (ws) => {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
   chatClients.add(ws);
 
   ws.on('close', () => {
@@ -452,6 +548,12 @@ chatWss.on('connection', (ws) => {
     try {
       msg = JSON.parse(raw.toString('utf8'));
     } catch {
+      return;
+    }
+
+    if (msg.type === 'ping') {
+      ws.isAlive = true;
+      if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
       return;
     }
 
@@ -654,6 +756,10 @@ termWss.on('connection', async (ws, _req, url) => {
     } catch {
       return;
     }
+    if (msg.type === 'ping') {
+      if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+      return;
+    }
     if (msg.type === 'input' && typeof msg.data === 'string') {
       shell?.write(msg.data);
     } else if (msg.type === 'resize') {
@@ -665,6 +771,18 @@ termWss.on('connection', async (ws, _req, url) => {
     shell?.close();
   });
 });
+
+// Periodic server-side WS keepalive ping (detects silent NAT/mobile drops)
+setInterval(() => {
+  for (const ws of chatClients) {
+    if (ws.isAlive === false) {
+      try { ws.terminate(); } catch {}
+      continue;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch {}
+  }
+}, 25000).unref();
 
 server.listen(PORT, HOST, () => {
   console.log(`\n🚀 SSH AI Chat 已启动: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
